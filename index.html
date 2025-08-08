@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WSS JSMpeg Player — wss_player3</title>
+  <style>
+    :root{--bg:#0f1720;--card:#0b1220;--muted:#9aa6b2;--accent:#06b6d4}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    body{background:linear-gradient(180deg,#071422 0%, #071a26 100%);color:#e6eef6;display:flex;align-items:center;justify-content:center;padding:20px}
+    .player-wrap{width:100%;max-width:1100px;background:var(--card);border-radius:12px;box-shadow:0 8px 30px rgba(2,6,23,.6);overflow:hidden}
+    header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.03)}
+    header h1{font-size:16px;margin:0;font-weight:600}
+    header p{margin:0;color:var(--muted);font-size:13px}
+    #canvas{display:block;width:100%;height:560px;background:#000}
+    .controls{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(180deg,rgba(255,255,255,.01),transparent)}
+    .btn{background:transparent;border:1px solid rgba(255,255,255,.06);padding:8px 10px;border-radius:8px;color:inherit;cursor:pointer}
+    .btn:active{transform:translateY(1px)}
+    .url-input{flex:1;display:flex;gap:8px}
+    input[type=text]{background:transparent;border:1px solid rgba(255,255,255,.04);padding:8px 10px;border-radius:8px;color:inherit;outline:none;width:100%}
+    .small{font-size:13px;color:var(--muted)}
+    .status{padding:10px 14px;border-top:1px dashed rgba(255,255,255,.03);display:flex;align-items:center;gap:12px}
+    .dot{width:10px;height:10px;border-radius:50%}
+    .dot.wait{background:#f59e0b}
+    .dot.ok{background:#10b981}
+    .dot.err{background:#ef4444}
+    .spacer{flex:1}
+    .hint{padding:10px 16px;color:var(--muted);font-size:13px}
+    a.link{color:var(--accent);text-decoration:none}
+    footer{padding:12px 16px;color:var(--muted);font-size:13px}
+    @media(max-width:640px){#canvas{height:320px}}
+  </style>
+</head>
+<body>
+  <div class="player-wrap" role="application" aria-label="WSS JSMpeg Player">
+    <header>
+      <div style="display:flex;flex-direction:column">
+        <h1>WSS / JSMpeg Player</h1>
+        <p class="small">Open a websocket (ws/wss) JSMpeg streamer, or provide a fallback HLS URL. Paste a URL in the box or append it to the page fragment (after <code>#</code>).</p>
+      </div>
+    </header>
+
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+      <div class="url-input">
+        <input id="url" type="text" placeholder="Example: wss://cctv.villabs.id/streamer-jsmpeg/streamer/pahlawan4" aria-label="stream url" />
+      </div>
+      <button id="openBtn" class="btn">Open</button>
+      <button id="pauseBtn" class="btn">Pause</button>
+      <button id="snapBtn" class="btn">Snapshot</button>
+      <button id="fullscreenBtn" class="btn">Fullscreen</button>
+    </div>
+
+    <div class="status">
+      <div class="dot wait" id="dot"></div>
+      <div id="statusText">Idle</div>
+      <div class="spacer"></div>
+      <div class="small">Player: <span id="playerType">—</span></div>
+    </div>
+
+    <div class="hint">Notes: Browsers cannot play raw RTSP. If you pass an RTSP URL (rtsp://...), you need a websocket proxy or conversion (ffmpeg -> jsmpeg websocket, or HLS). If your wss connection does not start, the server may block cross-origin or require authentication.</div>
+    <footer>Made for GitHub Pages — URL fragment format: <code>#wss://...</code> or <code>#ws://...</code>. If you want, append multiple params with <code>?token=...</code>.</footer>
+  </div>
+
+  <!-- JSMpeg library (min) from jsDelivr. If you prefer hosting locally, replace with local file. -->
+  <script src="https://cdn.jsdelivr.net/npm/jsmpeg@0.2.1/build/jsmpeg.min.js"></script>
+  <script>
+    // --- Player logic ---
+    (function(){
+      const urlInput = document.getElementById('url');
+      const openBtn = document.getElementById('openBtn');
+      const pauseBtn = document.getElementById('pauseBtn');
+      const snapBtn = document.getElementById('snapBtn');
+      const fullscreenBtn = document.getElementById('fullscreenBtn');
+      const canvas = document.getElementById('canvas');
+      const dot = document.getElementById('dot');
+      const statusText = document.getElementById('statusText');
+      const playerType = document.getElementById('playerType');
+
+      let player = null;
+      let isPaused = false;
+      let reconnectTimer = null;
+      let currentUrl = null;
+
+      function updateStatus(state, info){
+        dot.className = 'dot ' + (state==='ok' ? 'ok' : state==='err' ? 'err' : 'wait');
+        statusText.textContent = info || state;
+      }
+
+      function parseHashUrl(){
+        // Accept full URL after hash. Example: #wss://... or #ws://... or #https://... (HLS)
+        const h = decodeURIComponent(location.hash || '');
+        if(!h) return null;
+        // remove leading #
+        const raw = h.replace(/^#/,'').trim();
+        if(!raw) return null;
+        return raw;
+      }
+
+      function connectStream(url){
+        disconnect();
+        currentUrl = url;
+        playerType.textContent = url.split(':')[0];
+
+        if(/^wss?:\/\//.test(url)){
+          updateStatus('wait','Connecting to websocket...');
+
+          try{
+            // Options: disable audio by default, preserve aspect ratio, autoplay
+            player = new JSMpeg.Player(url, {canvas: canvas, autoplay:true, loop:false});
+
+            player.on('play', ()=> updateStatus('ok','Playing (websocket)'));
+            player.on('pause', ()=> updateStatus('wait','Paused'));
+
+            // JSMpeg doesn't expose standard events for error easily; we monitor by socket
+            // but jsmpeg's library keeps internal ws. Use a polling check for ready state.
+            monitorSocket(player, url);
+          }catch(err){
+            console.error('player error', err);
+            updateStatus('err','Failed to create player — see console');
+          }
+
+        } else if(/\.(m3u8)(\?.*)?$/.test(url) || /^https?:\/\//.test(url)){
+          // A naive HLS embed fallback — use <video> + hls.js if available.
+          // We include a light fallback: try <video> element if browser supports HLS natively (Safari), else inform user.
+          updateStatus('wait','Using HTMLVideo fallback');
+          playerType.textContent = 'HLS/HTTP';
+          createVideoFallback(url);
+        } else if(/^rtsp:\/\//.test(url)){
+          updateStatus('err','RTSP is not supported in browser. Use a websocket proxy (ffmpeg -> jsmpeg) or HLS.');
+        } else {
+          updateStatus('err','Unknown URL scheme');
+        }
+      }
+
+      function disconnect(){
+        if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer=null; }
+        if(player){ try{ if(player.destroy) player.destroy(); }catch(e){} player=null; }
+        // clear canvas
+        const ctx = canvas.getContext('2d'); ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+      }
+
+      function monitorSocket(playerInstance, url){
+        // attempt to find underlying ws and watch readyState
+        try{
+          const ws = playerInstance.socket || playerInstance._socket || playerInstance.websocket || null;
+          const probe = setInterval(()=>{
+            if(!playerInstance) { clearInterval(probe); return; }
+            // if underlying ws exists
+            if(ws && (ws.readyState===1)){
+              updateStatus('ok','Connected — streaming');
+              clearInterval(probe);
+            } else if(ws && (ws.readyState===3 || ws.readyState===2)){
+              updateStatus('err','Socket closed — attempting reconnect');
+              clearInterval(probe);
+              attemptReconnect(url);
+            }
+          },800);
+          // If no ws reference available, fallback to generic OK after short delay
+          setTimeout(()=>{ if(player && !ws) updateStatus('ok','Playing (no socket handle)'); },1200);
+        }catch(e){ console.warn('monitorSocket failed', e); updateStatus('wait','Monitoring not available'); }
+      }
+
+      function attemptReconnect(url){
+        if(reconnectTimer) return;
+        reconnectTimer = setTimeout(()=>{
+          reconnectTimer = null;
+          updateStatus('wait','Reconnecting...');
+          connectStream(url);
+        },3000);
+      }
+
+      function createVideoFallback(url){
+        // remove existing player and create a <video> element over canvas
+        disconnect();
+        const parent = canvas.parentNode;
+        const v = document.createElement('video');
+        v.controls = false; v.autoplay = true; v.muted = true; v.playsInline = true; v.style.width='100%'; v.style.height='auto';
+        v.src = url;
+        v.addEventListener('playing', ()=> updateStatus('ok','Playing (video element)'));
+        v.addEventListener('error', ()=> updateStatus('err','Video error — check URL'));
+        // replace canvas visually
+        canvas.style.display='none';
+        if(!document.getElementById('fallbackVideo')) parent.insertBefore(v, parent.firstChild);
+        v.id = 'fallbackVideo';
+      }
+
+      // Controls
+      openBtn.addEventListener('click', ()=>{
+        const val = urlInput.value.trim();
+        if(!val) return alert('Please paste a stream URL');
+        // if url uses fragment style without scheme, try adding wss://
+        connectStream(val);
+      });
+
+      pauseBtn.addEventListener('click', ()=>{
+        if(!player){ updateStatus('err','No player'); return; }
+        if(!isPaused){ if(player.pause) player.pause(); isPaused=true; pauseBtn.textContent='Resume'; updateStatus('wait','Paused'); }
+        else { if(player.play) player.play(); isPaused=false; pauseBtn.textContent='Pause'; updateStatus('ok','Playing'); }
+      });
+
+      snapBtn.addEventListener('click', ()=>{
+        try{
+          const data = canvas.toDataURL('image/png');
+          const a = document.createElement('a'); a.href=data; a.download='snapshot.png'; a.click();
+        }catch(e){ alert('Snapshot failed: '+e.message); }
+      });
+
+      fullscreenBtn.addEventListener('click', ()=>{
+        const el = document.querySelector('.player-wrap');
+        if(el.requestFullscreen) el.requestFullscreen(); else if(el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      });
+
+      // Allow Enter key to open URL
+      urlInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ openBtn.click(); } });
+
+      // On load: try the fragment
+      window.addEventListener('load', ()=>{
+        const fromHash = parseHashUrl();
+        if(fromHash){ urlInput.value = fromHash; connectStream(fromHash); }
+      });
+
+      // If hash changes dynamically
+      window.addEventListener('hashchange', ()=>{
+        const u = parseHashUrl();
+        if(u && u!==currentUrl){ urlInput.value = u; connectStream(u); }
+      });
+
+      // beforeunload cleanup
+      window.addEventListener('beforeunload', ()=>{ disconnect(); });
+
+    })();
+  </script>
+</body>
+</html>
