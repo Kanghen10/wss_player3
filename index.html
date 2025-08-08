@@ -5,22 +5,16 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Minimal WSS JSMpeg Fullscreen Player</title>
   <style>
-    html,body{height:100%;margin:0;background:#000;overflow:hidden}
+    html,body{height:100%;margin:0;background:#000}
     #canvas{
       display:block;
       width:100vw;
       height:100vh;
       background:#000;
-      object-fit:contain;
+      object-fit:contain; /* Biar video tidak ketarik */
     }
-    .wrap{
-      width:100vw;
-      height:100vh;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      background:#000;
-    }
+    .wrap{width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;background:#000}
+    body{overflow:hidden}
   </style>
 </head>
 <body>
@@ -28,13 +22,22 @@
     <canvas id="canvas"></canvas>
   </div>
 
-  <script src="https://raw.githubusercontent.com/phoboslab/jsmpeg/master/jsmpeg.min.js"></script>
+  <!-- Load JSMpeg dari file lokal -->
+  <script src="jsmpeg.min.js"></script>
+
   <script>
     (function(){
       'use strict';
       const DEFAULT = 'wss://cctv.villabs.id/streamer-jsmpeg/streamer/pahlawan4';
       const canvas = document.getElementById('canvas');
       let player = null;
+
+      function parseHash(){
+        try{
+          const h = decodeURIComponent(location.hash||'').replace(/^#/,'').trim();
+          return h||null;
+        }catch(e){ return null; }
+      }
 
       function waitForJSMpeg(timeout=5000){
         return new Promise((resolve,reject)=>{
@@ -49,21 +52,60 @@
 
       function openStream(url){
         try{
-          if(player && player.destroy) player.destroy();
-          player = new JSMpeg.Player(url, {canvas: canvas, autoplay:true, audio:false, loop:false});
+          if(!window.JSMpeg) throw new Error('JSMpeg missing');
+          if(player && player.destroy) try{ player.destroy(); }catch(e){}
+          
+          player = new JSMpeg.Player(url, {
+            canvas: canvas,
+            autoplay:true,
+            audio:false,
+            loop:false
+          });
+
+          player.on && player.on('play', ()=>console.log('playing'));
+          player.on && player.on('pause', ()=>console.log('paused'));
         }catch(err){
           console.error('openStream error', err);
         }
       }
 
       (async function init(){
+        const url = parseHash() || DEFAULT;
         try{
-          await waitForJSMpeg();
-          openStream(DEFAULT);
+          await waitForJSMpeg(4000);
+          setTimeout(()=> openStream(url), 50);
         }catch(e){
-          console.error('JSMpeg failed to load', e);
+          console.error('JSMpeg library failed to load', e);
+          const ctx = canvas.getContext('2d');
+          canvas.width = window.innerWidth; 
+          canvas.height = window.innerHeight;
+          ctx.fillStyle = '#000'; 
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#fff'; 
+          ctx.font = '20px sans-serif';
+          ctx.textAlign = 'center'; 
+          ctx.fillText('JSMpeg failed to load', canvas.width/2, canvas.height/2);
         }
       })();
+
+      function resize(){
+        const w = window.innerWidth, h = window.innerHeight;
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        if(window.devicePixelRatio){
+          canvas.width = Math.floor(w * Math.min(window.devicePixelRatio,2));
+          canvas.height = Math.floor(h * Math.min(window.devicePixelRatio,2));
+        } else {
+          canvas.width = w; canvas.height = h;
+        }
+      }
+      window.addEventListener('resize', resize);
+      resize();
+
+      window.addEventListener('beforeunload', ()=>{
+        try{ player && player.destroy && player.destroy(); }catch(e){}
+      });
+
     })();
   </script>
 </body>
